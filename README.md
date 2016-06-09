@@ -1,4 +1,4 @@
-# MarkerDev
+# Marker development from RNAseq data
 
 We developed a workflow to extract shared orthologous regions between sister taxa from RNAseq data. Steps include:
 - transcriptome de novo assembly
