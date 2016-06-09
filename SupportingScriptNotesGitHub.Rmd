@@ -1,0 +1,1949 @@
+---
+title: "SupportingScriptnotes for the transcriptome de novo assembly"
+author: "Jeannine Marquardt"
+date: "23 February 2016"
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    highlight: pygments
+---
+
+This supplement document is to provide detailed information on the applied parameters throughout each/most steps of the NGS data analyses, mainly done with GATK. The parameters are specific to the nature of our data and should only be taken as cautious guidance. It is not meant as a off the shelf script. 
+
+# RNAseq assembly
+
+1.  Adapter trimming (cutadapt, fastx toolkit, fastqc)
+2.  _De novo_ assembly
+  + SOAPdenovo-TRANS
+  + Trinity
+  + Velvet/VelvetOptimiser
+  + Newbler (on iplant)
+3. Redundancy removal by employing the EvidentialGene tr2aacds pipeline (Gilbert 2013)
+4. Read re-alignment (Trinity, bowtie2 v2.1.0)
+
+##  _De novo_ assemblies
+Code exemplified for one Illumina library (SWA1): 
+
+```{r, engine='bash', eval=FALSE}
+# Trinity
+# Trinity version: trinityrnaseq_r2013_08_14
+Trinity.pl --seqType fq --JM 100G --CPU 10 --full_cleanup --left /data/scratch/btw680/reads/SWA1_R1_trimcut6_stillpaired.fastq.gz --right /data/scratch/btw680/reads/SWA1_R2_trimcut6_stillpaired.fastq.gz --output ./trinity-24-5-2014_SWA1 --min_contig_length 200 >./trinity-24-5-2014_SWA1/std.out 2>./trinity-24-5-2014_SWA1/std.err
+# output trinity-24-5-2014_SWA1.Trinity.fasta
+
+# SOAP-trans denovo
+# The version 1.03: released on July 19th, 2013
+# kmer = 25/31/75
+
+SOAPdenovo-Trans-31mer all -s /data/scratch/btw680/analyses/SOAPtrans/config/SWA1_PE3_sin3_4542.config -o SWA1_PE3_sin3_4542_kmer25 -R YES - S YES -K 25 -L 200 >./std_kmer25.out
+#output SWA1_PE3_sin3_4542_kmer25.scafSeq
+
+# VelvetOptimiser and Velvet/Oases
+# VelvetOptimiser.pl Version 2.2.5
+
+fastq_interleave_pairs.pl /data/scratch/btw680/reads/SWA1_R1_trimcut6_stillpaired.fastq.gz /data/scratch/btw680/reads/SWA1_R2_trimcut6_stillpaired.fastq.gz > SWA1_R1_R2_interlaced.fa
+
+velvetoptimiser.pl -t 16 -p "SWA1" -d "./SWA1-26-5-2014" -o "-read_trkg yes -unused_reads yes" -f '-shortPaired -fastq ./SWA1-26-5-2014/SWA1_R1_R2_interlaced.fq -short -fastq /data/scratch/btw680/reads/SWA1_singlets_trimcut6_rename.fastq'
+
+oases SWA1-26-5-2014 -min_trans_lgth 200 -ins_length 202 >./SWA1-26-5-2014/std.out
+# output OaV_SWA1_transcripts.fa
+
+#### Newbler R454 (= SWA4) on iplant
+# newbler-2.6.0u1 -cdna -notrim -cpu=24 --processorCount=1
+
+```
+
+##  Redundancy removal 
+Code exemplified for one Illumina library (SWA1): 
+
+```{r, engine='bash', eval=FALSE}
+
+# rename input files
+python2.7 ~/software/scripts/rename_evig2.py 29-5-2014/SWA1/SWA1.tr 27-6-2014/SWA1/SWA1_ren.tr SWA1
+
+# run evidential gene
+tr2aacds.pl -mrnaseq SWA1/SWA1_ren.tr -MINCDS=90 -NCPU=4 -logfile -tidyup
+
+# rename sequence header in output files
+python2.7 ~/software/scripts/rename_post_evig.py SWA1_ren.okay.tr/cds/aa SWA1_ren.okay_ren.tr/cds/aa 
+```
+
+##  Read alignment to main = 'okay' transcripts
+Code exemplified for one Illumina library (SWA1): 
+
+```{r, engine='bash', eval=FALSE}
+# prepare read alignment
+# shell realignSWA1vsSWA1okay_cdsNov15.sh
+
+TARGETdir=/data/scratch/btw680/analyses/trinBlast/inputreads/oksets_27June/SWA1_ren.okay_ren.cds
+
+~/software/scripts/singleline.pl $TARGETdir > SWA1_ren.okay_ren.sl.cds
+
+TARGETref=SWA1_ren.okay_ren.sl.cds
+samtools faidx $TARGETref
+
+OUTNAME=SWA1vsSWA1okay_cds
+LEFT=/data/home/btw680/archive/Jeannine_analyses/Illu_readsAprNew2014/SWA1_R1_trimcut6_stillpaired.fastq
+RIGHT=/data/home/btw680/archive/Jeannine_analyses/Illu_readsAprNew2014/SWA1_R2_trimcut6_stillpaired.fastq
+
+alignReads.pl --left $LEFT --right $RIGHT --seqType fq --target $TARGETref --retain_SAM_files --output $OUTNAME --aligner bowtie2 -- -p 16 --very-sensitive > ${OUTNAME}_$(date +%d-%m).log.txt
+
+# Alignment stats
+
+SAM_nameSorted_to_uniq_count_stats.pl ${OUTNAME}.nameSorted.sam > out.SAMname.stats.txt
+samstats.pl ${OUTNAME}.nameSorted.sam > out.samstats.coord.txt
+
+# Prepare reference for Gatk input
+cd $OUTDIR/$OUTNAME
+cp ../$TARGETref ./
+
+mv $TARGETref ${TARGETref}.fa
+CreateSequenceDictionary.jar R=${TARGETref}.fa O=${TARGETref}.dict
+cp ${TARGETref}.dict SWA1_ren.okay_ren.sl.dict
+
+# Prepare SWA1 sam/bam for GATk input
+
+samtools view -hS -t ${TARGETref}.fa.fai ${OUTNAME}.coordSorted.sam -o ${OUTNAME}.coordSorted_header.sam
+
+AddOrReplaceReadGroups.jar I=${OUTNAME}.coordSorted_header.sam O=${OUTNAME}.coordSorted_RGh.sam SO=coordinate ID=SWA1 PL=ILLUMINA SM=SWA1 LB=LIB-SWA1-1 PI=202 PU=SWA1 CREATE_INDEX=true
+
+ValidateSamFile.jar INPUT=${OUTNAME}.coordSorted_RGh.sam 
+
+samtools view -bhS ${OUTNAME}.coordSorted_RGh.sam > ${OUTNAME}.coordSorted_RGh.bam
+samtools index ${OUTNAME}.coordSorted_RGh.bam
+
+# Realign reads around indels
+
+GenomeAnalysisTK.jar -T RealignerTargetCreator -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.bam -o ${OUTNAME}.coordSorted_RGh.intervals
+
+GenomeAnalysisTK.jar -T IndelRealigner -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.bam -targetIntervals ${OUTNAME}.coordSorted_RGh.intervals -o ${OUTNAME}.coordSorted_RGh.raln.bam
+samtools index ${OUTNAME}.coordSorted_RGh.raln.bam 
+
+# Recalibrate the base quality score (for multiple files)
+# First for BQSR of ${OUTNAME}.coordSorted_RGh.raln.bam
+
+GenomeAnalysisTK.jar -T UnifiedGenotyper -I ${OUTNAME}.coordSorted_RGh.raln.bam -R ${TARGETref}.fa -glm BOTH -o ${OUTNAME}.coordSorted_RGh.raln.raw.vcf
+
+GenomeAnalysisTK.jar -T BaseRecalibrator -I ${OUTNAME}.coordSorted_RGh.raln.bam -R ${TARGETref}.fa -knownSites ${OUTNAME}.coordSorted_RGh.raln.raw.vcf --maximum_cycle_value 800 -o ${OUTNAME}.coordSorted_RGh.raln.recal_data.before.grp
+
+GenomeAnalysisTK.jar -T PrintReads -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.raln.bam -BQSR ${OUTNAME}.coordSorted_RGh.raln.recal_data.before.grp -o ${OUTNAME}.coordSorted_RGh.raln.recal.bam
+
+# Second round for BQSR of ${OUTNAME}.coordSorted_RGh.raln.bam
+
+GenomeAnalysisTK.jar -T UnifiedGenotyper -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.raln.recal.bam -glm BOTH -o ${OUTNAME}.coordSorted_RGh.raln.recal.raw.vcf
+
+GenomeAnalysisTK.jar -T BaseRecalibrator -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.raln.recal.bam -knownSites ${OUTNAME}.coordSorted_RGh.raln.recal.raw.vcf --maximum_cycle_value 800  -o ${OUTNAME}.coordSorted_RGh.raln.recal2_data.before.grp
+
+GenomeAnalysisTK.jar -T PrintReads -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.raln.recal.bam -BQSR ${OUTNAME}.coordSorted_RGh.raln.recal2_data.before.grp -o ${OUTNAME}.coordSorted_RGh.raln.recal2.bam
+
+GenomeAnalysisTK.jar -T BaseRecalibrator -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.raln.recal2.bam -knownSites ${OUTNAME}.coordSorted_RGh.raln.recal.raw.vcf --maximum_cycle_value 800 -o ${OUTNAME}.coordSorted_RGh.raln.recal2_data.after.grp
+
+# Third round for BQSR of ${OUTNAME}.coordSorted_RGh.raln.bam
+
+GenomeAnalysisTK.jar -T UnifiedGenotyper -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.raln.recal2.bam -glm BOTH -o ${OUTNAME}.coordSorted_RGh.raln.recal2.raw.vcf
+
+GenomeAnalysisTK.jar -T PrintReads -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.raln.recal2.bam -BQSR ${OUTNAME}.coordSorted_RGh.raln.recal2_data.after.grp -o ${OUTNAME}.coordSorted_RGh.raln.recal3.bam
+
+GenomeAnalysisTK.jar -T BaseRecalibrator -R ${TARGETref}.fa -I ${OUTNAME}.coordSorted_RGh.raln.recal3.bam -knownSites ${OUTNAME}.coordSorted_RGh.raln.recal2.raw.vcf --maximum_cycle_value 800 -o ${OUTNAME}.coordSorted_RGh.raln.recal3_data.after.grp
+
+# Coord sort & removal of non-unique aligned reads
+
+samtools sort ${OUTNAME}.coordSorted_RGh.raln.recal3.bam ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted
+
+samtools index ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.bam
+
+samtools rmdup -S ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.bam ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam
+
+samtools index ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam 
+
+# Get coverage
+
+bamToBed -i ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam > ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bed
+
+samtools depth -b ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bed ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam > ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup_samdepth.txt
+
+Rscript /scratch/nine/cov_musagenesAug14/coverage.R ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup_samdepth.txt ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup_cov.txt
+
+# Get alignment stats
+samtools flagstat ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam
+
+```
+
+# Proteome comparison and extracting homologous sequences for a bluebell reference
+
+In general, we first obtained all possible sequences per species and region. Secondly, we compared the sequences to the reference species (nt: _Musa acuminata_; cp + mt: _Phoenix dactylifera_) by reciprocal blast search (tBLASTn & BLASTx). The blast analysis was further annotated using the “analyze_blastPlus_topHit_coverage.pl”. Thirdly, we locally aligned all bluebell transcripts to each other in protein space (BLASTp). And lastly extracted the best transcript (i.e. longest open reading frame) as reference sequence.
+
+##  Nuclear marker
+
+Exemplified for SWA1:
+
+```{r, engine='bash', eval=FALSE}
+# blast.log.txt
+
+# Download coding sequences of reference species Musa acuminata
+# http://plants.ensembl.org/biomart/martview/d59f7b9a03d70abb3d48d2fcc9b9b675
+# MA1 2012-08-Cirad
+# Gene type:protein_coding
+# Attributes: Gene stable ID, Transcript stable ID, Gene name, Gene description, Gene biotype, Transcript count, Transcript biotype, Strand, GO term accession, GO term name, GO term definition, GOSlim GOA accession, GOSlim GOA description, Protein stable ID
+
+# 1. Prepare fasta files for blast searches
+cd /data/scratch/btw680/analyses/trinBlast/DB
+
+makeblastdb -in ../inputreads/oksets_27June/SWA1_ren.okay_ren.aa -dbtype prot -out ./SWA1_aaDB > std.aa_SWA1.out
+
+makeblastdb -in MACU_cDNA_codgenes.fas -dbtype nucl -out ./MACUM_cDNADB > std.cDNA_MACUMcDNA.out
+
+# 2. Blast reciprocally against reference species
+blastx -query DB/references/MACU_cDNA_codgenes.fas -db DB/SWA1_aaDB -out outputs/MACUMcDNA_to_DBSWA1aa.oft6.blx -evalue 1e-20 -num_threads 2 -max_target_seqs 1 -outfmt 6 2> std.McdxSWA1aa.err
+
+analyze_blastPlus_topHit_coverage.pl MACUMcDNA_to_DBSWA1aa.oft6.blx   ../DB/references/MACU_cDNA_codgenes.fas ../inputreads/oksets_27June/SWA1_ren.okay_ren.aa
+
+tblastn -query inputreads/oksets_27June/SWA1_ren.okay_ren.aa -db DB/references/MACUM_cDNADB -out outputs/SWA1aa_to_DBMACUMcDNA.oft6.tbln -evalue 1e-20 -num_threads 2 -max_target_seqs 1 -outfmt 6 2> std.SWA1aatnMcd.err
+
+analyze_blastPlus_topHit_coverage.pl SWA1aa_to_DBMACUMcDNA.oft6.tbln ../inputreads/oksets_aa/SWA1.okay.aa_ren.fasta ../DB/references/MACU_cDNA_codgenes.fas 
+
+# 2. Blast reciprocally against all bluebell species
+
+blastp -query inputreads/oksets_27June/SWA1_ren.okay_ren.aa -db DB/SWA2_aaDB -out outputs/SWA1aa_to_DBaaSWA2.oft6.blp -evalue 1e-20 -num_threads 2 -max_target_seqs 1 -outfmt 6 2> std.SWA1p2.err
+
+blastp -query inputreads/oksets_27June/SWA1_ren.okay_ren.aa -db DB/SWA3_aaDB -out outputs/SWA1aa_to_DBaaSWA3.oft6.blp -evalue 1e-20 -num_threads 2 -max_target_seqs 1 -outfmt 6 2> std.SWA1p3.err
+
+blastp -query inputreads/oksets_27June/SWA1_ren.okay_ren.aa -db DB/SWA4_aaDB -out outputs/SWA1aa_to_DBaaSWA4.oft6.blp -evalue 1e-20 -num_threads 2 -max_target_seqs 1 -outfmt 6 2> std.SWA1p4.err
+
+# 3. Run script that parses the blast results in one table
+python2.6 getting_common_geneSWA123_JM80.py
+
+# INPUT:
+# MACUMcDNA_to_DBSWA1aa.oft6.blx.w_pct_hit_length and SWA1aa_to_DBMACUMcDNA.oft6.tbln.w_pct_hit_length # annotated reciprocal reference blast
+# SWA1aa_to_DBaaSWA2.oft6.blp, SWA2aa_to_DBaaSWA1.oft6.blp, ... # reciprocal blast search between three bluebell species
+
+# OUTPUT:
+# SWA123_MACUM_cov80_GSIDM_list.txt # list of Musa gene IDs
+# SWA123_MACUM_cov80.tab            # table of bluebell genes that match Musa
+# at length coverage > 80           # from analyze_blastPlus_topHit_coverage.pl
+
+# 4. Pull out the sequences into individual fasta files by genes (w/o M. acuminata cds)
+python2.6 get_seq_SWA1-3_noMACUM_cov80.py
+
+# INPUT:
+# SWA123_MACUM_cov80.tab # table matching all cds
+# SWA1_ren.okay_ren.cds, SWA2_ren.okay_ren.cds, SWA3_ren.okay_ren.cds # input reads
+
+# OUTPUT
+# individual fasta file per gene
+
+# 5. Global sequence alignment per gene
+# PRANK v.140603:
+
+cd /data/scratch/btw680/analyses/trinBlast/align/gene_seq_SWA123_80cov_noMACU/
+mkdir prank_input
+mkdir prank_output
+
+# Prank cannot handle unambigous sites
+for i in *.fas ; do sed 's/N//g' $i > prank_input/$i; done
+
+mkdir prank_input
+for i in *.fas; do ../addNN.py $i ./prank_input/$i; done # correct N removal
+
+# Sequence alignment
+for i in *.fas; do prank -codon -DNA -F -d=$i -showevents -showtree -o=../prank_output/$i; done >> ../prank_output/prank30Jul.log
+
+for i in *.fas; do perl ~/Documents/NGS_transcriptomeSWA/singleline.pl $i > singlelineFas/$i; done
+
+# 6. Extract the most complete reference sequence (usually SWA2, or SWA1)
+
+# INPUT: fasta file per gene
+for i in *.fas; do ~/Documents/NGS_transcriptomeSWA/05_cov_musagenes/getreferenceseqs.py $i outTRUE_file2.txt True >> list_name2.txt; done 
+
+# Manually check alignment were it was too complex for the script
+while read line; do name=$line; cp $name ./checkalign/$name; done < list_name2.txt
+
+# Rename sequence names
+for i in *.fas; do python ~/Documents/NGS_transcriptomeSWA/05_cov_musagenes/renameappend_ref_files.py $i outmanall.txt; done
+
+# cutadapt version 1.4.1 - double check for potential adapters
+cd /Users/Jeannine/Documents/NGS_transcriptomeSWA/05_cov_musagenes
+#adapters in refseq.conf
+cutadapt $(<refseq.conf) -o refseq.test.fas -f fasta refseqs.fas 
+
+# Final reference: refseq_1046_manedt.fas
+
+```
+
+### Extract GO term annotations from _Musa acuminata_
+
+```{r, engine='bash', eval=FALSE}
+cd ~/Documents/NGS_transcriptomeSWA/07_selectloci
+python parseanno.py sorted_genelist_1046genes.txt bana_codgenes_annotation.txt
+
+# Extract flowering key words
+
+# Extract cytonuclear interaction keywords 
+```
+
+##  Chloroplast
+
+Extracting bluebell sequences for the chloroplast genes examplified by blast searches:
+
+```{r, engine='bash', eval=FALSE}
+# Download coding sequences of reference species: 
+# Phoenix dactylifera chloroplast, complete genome
+# NCBI Reference Sequence: NC_013991.2
+# http://www.ncbi.nlm.nih.gov/nuccore/
+
+# (prepare) blast search of shared coding sequences
+# script cpblast_cds_PhoD_e-20.sh
+
+makeblastdb -in PhoD_cp_nt_cds_ren.fa -dbtype nucl -out PhoD_cp_cds_nucl.DB > std.nucl.PhoD_cp_cdsDNA.out
+
+time tblastn -query SWA1_ren.okay_ren.aa -db PhoD_cp_cds_nucl.DB -out outputs$(date +%d-%m-%y)/SWA1aa_to_DBPDcpcds.oft6.e-20.tbln -evalue 1e-20 -num_threads 4 -max_target_seqs 1 -outfmt 6 2> std.SWA1aatnPDcpcds.err
+
+analyze_blastPlus_topHit_coverage.pl SWA1aa_to_DBPDcpcds.oft6.e-20.tbln ../SWA1_ren.okay_ren.aa ../PhoD_cp_nt_cds_ren.fa
+
+
+```
+
+Compare for all three bluebell transcriptomes which transcripts found blast matches to _Phoenix dactylifera_ coding sequences. And manually pull out those transcripts with the highest length coverage and identity score. In addition re-align the RNAseq data to coding sequences of the organelle of _Phoenix dactylifera_.
+
+##  Mitochondrion
+
+Extracting bluebell sequences for the mitochondrion genes by realigning the trimmed RNAseq data:
+
+```{r, engine='bash', eval=FALSE}
+# Download coding sequences of reference species: 
+# Phoenix dactylifera mitochondrion, complete genome
+# NCBI Reference Sequence: NC_016740.1
+# http://www.ncbi.nlm.nih.gov/nuccore/372450205
+
+# script: /scratch/nine/cov_musagenesAug14/mtalign/realignSWA1vsALLcdsPHODmt.sh
+TARGETref=PhoD_mt_nt_cds_ren.fa
+OUTNAME=SWA1
+
+alignReads.pl --left $LEFT --right $RIGHT --seqType fq --target $TARGETref --retain_SAM_files --output $OUTNAME --aligner bowtie2 -- -p 16 --very-sensitive > ${OUTNAME}_$(date +%d-%m).log.txt 2>&1
+
+# Prepare reference for Gatk input
+CreateSequenceDictionary.jar R=$TARGETref O=${TARGETref}.dict
+cp ${TARGETref}.dict  PhoD_mt_nt_cds_ren.dict
+samtools faidx $TARGETref
+
+# Prepare SWA1 sam/bam for Gatk input
+
+samtools view -hS -t ../${TARGETref}.fai ${OUTNAME}.coordSorted.sam -o ${OUTNAME}.coordSorted_header.sam
+
+AddOrReplaceReadGroups.jar I=${OUTNAME}.coordSorted_header.sam O=${OUTNAME}.coordSorted_RGh.sam SO=coordinate ID=FC1.L1 PL=ILLUMINA SM=SWA1 LB=LIB-SWA1-1 PI=250 PU=SWA1 CREATE_INDEX=true
+
+samtools view -bhS ${OUTNAME}.coordSorted_RGh.sam > ${OUTNAME}.coordSorted_RGh.bam
+
+samtools index ${OUTNAME}.coordSorted_RGh.bam
+
+# Realign reads around indels
+
+GenomeAnalysisTK.jar -T RealignerTargetCreator -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.bam \
+-o ${OUTNAME}.coordSorted_RGh.intervals
+
+GenomeAnalysisTK.jar -T IndelRealigner -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.bam \
+-targetIntervals ${OUTNAME}.coordSorted_RGh.intervals \
+-o ${OUTNAME}.coordSorted_RGh.raln.bam
+
+samtools index ${OUTNAME}.coordSorted_RGh.raln.bam 
+
+# Recalibrate the base quality score (for multiple files)
+# first for BQSR of ${OUTNAME}.coordSorted_RGh.raln.bam
+
+GenomeAnalysisTK.jar -T UnifiedGenotyper -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.raln.bam  \
+-glm BOTH \
+-o ${OUTNAME}.coordSorted_RGh.raln.raw.vcf
+
+GenomeAnalysisTK.jar -T BaseRecalibrator -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.raln.bam \
+-knownSites ${OUTNAME}.coordSorted_RGh.raln.raw.vcf \
+-o ${OUTNAME}.coordSorted_RGh.raln.recal_data.before.grp
+
+GenomeAnalysisTK.jar -T PrintReads -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.raln.bam \
+-BQSR ${OUTNAME}.coordSorted_RGh.raln.recal_data.before.grp \
+-o ${OUTNAME}.coordSorted_RGh.raln.recal.bam
+
+# second round for BQSR of ${OUTNAME}.coordSorted_RGh.raln.bam
+
+GenomeAnalysisTK.jar -T UnifiedGenotyper -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.raln.recal.bam \
+-glm BOTH \
+-o ${OUTNAME}.coordSorted_RGh.raln.recal.raw.vcf
+
+GenomeAnalysisTK.jar -T BaseRecalibrator -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.raln.recal.bam \
+-knownSites ${OUTNAME}.coordSorted_RGh.raln.recal.raw.vcf \
+-o ${OUTNAME}.coordSorted_RGh.raln.recal2_data.before.grp
+
+GenomeAnalysisTK.jar -T PrintReads -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.raln.recal.bam \
+-BQSR ${OUTNAME}.coordSorted_RGh.raln.recal2_data.before.grp \
+-o ${OUTNAME}.coordSorted_RGh.raln.recal2.bam
+
+GenomeAnalysisTK.jar -T BaseRecalibrator -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.raln.recal2.bam \
+-knownSites ${OUTNAME}.coordSorted_RGh.raln.recal.raw.vcf \
+-o ${OUTNAME}.coordSorted_RGh.raln.recal2_data.after.grp
+
+#third round for BQSR of ${OUTNAME}.coordSorted_RGh.raln.bam"
+
+GenomeAnalysisTK.jar -T UnifiedGenotyper -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.raln.recal2.bam \
+-glm BOTH \
+-o ${OUTNAME}.coordSorted_RGh.raln.recal2.raw.vcf
+
+GenomeAnalysisTK.jar -T PrintReads -R ../$TARGETref \
+-I ${OUTNAME}.coordSorted_RGh.raln.recal2.bam \
+-BQSR ${OUTNAME}.coordSorted_RGh.raln.recal2_data.after.grp \
+-o ${OUTNAME}.coordSorted_RGh.raln.recal3.bam
+
+# Coord sort & removal of non-unique aligned reads (rmdup only requires bam file)
+samtools sort ${OUTNAME}.coordSorted_RGh.raln.recal3.bam ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted
+
+samtools index ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.bam
+
+samtools rmdup -S ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.bam ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam
+
+samtools index ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam 
+
+# Get coverage information
+
+bamToBed -i ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam > ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bed
+
+samtools depth -b ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bed ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam > ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup_samdepth.txt
+
+Rscript /scratch/nine/cov_musagenesAug14/coverage.R ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup_samdepth.txt ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup_cov.txt
+
+# extract consensus sequence from the alignment
+
+samtools mpileup -uf ../$TARGETref ${OUTNAME}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam | /share/apps/sbcs/bcftools/0.1.17/bin/bcftools view -cg - | /share/apps/sbcs/bcftools/0.1.17/bin/vcfutils.pl vcf2fq > cns_${OUTNAME}.fq
+
+```
+
+Repeat the above for all Illumina RNA-seq libraries (SWA1, SWA2, SWA3). Then create a tab delimited list of the commonly present loci; e.g. SWA1-3_40mtgenesPhoD.txt. Run the python parser script that extracts the common sequences for subsequent alignment.
+
+```{r, engine='bash', eval=FALSE}
+python2.6 get_seq_SWA123_mtPhoDcds_cns.py
+
+# input   SWA1-3_40mtgenesPhoD.txt
+# output  PhoD_mt_nt_cds_ren.fa
+```
+
+For all resulting fasta files run prank - coding frame aware global sequence alignment.
+
+```{r, engine='bash', eval=FALSE}
+for i in *.fas; do prank -DNA -F -d=$i -o=prank_output/$i; done >> prank_output/prank08Nov.log
+
+# reformat fasta file 
+for i in *.fas; do perl ~/Documents/NGS_transcriptomeSWA/singleline.pl $i > singlelineFas/$i; done
+
+# extract SWA2 sequences
+
+for i in *.fas; do grep -A 1 '|SWA2' $i >> refseqmtPhoD_40cds.fa; done 
+
+#remove terminal gaps from alignment
+sed 's/-//g' refseqmtPhoD_40cds.fa > refseqmtPhoD_40cds_nogap.fa
+```
+
+Download the alignments and manually check the completeness of the DNA sequences. Subsequently extract all sequences for SWA2. Bluebell reference of the mitochondrion sequences is done. 
+
+##  Longest open reading frame for the bluebell reference genes
+
+Lastly, extract for all assembled bluebell reference genes the longest open reading frame, which will be required for the variant annotation of potentially synonymous vs non-synonymous sites. 
+
+```{r, engine='bash', eval=FALSE}
+# log: SNP.log.txt on mac 26-10-2014
+# -> nuclear genes: best_candidates.eclipsed_orfs_removed_mod26-10.cds
+# -> cp & mt: refseq84cp40mtPhoDcds_sl_b.cds
+
+# transdecoder/trinity script
+transcripts_to_best_scoring_ORFs.pl -t refseqs_1046_manedt.fa 
+```
+
+# Variant discovery 
+
+##  Nuclear marker
+
+```{r, engine='bash', eval=FALSE}
+# script Snp_calling_MusA.sh
+# following Gatk's RNAseq discovery best practise at the time
+
+# set working directory
+cd /scratch/nine/cov_musagenesAug14/bangen
+mkdir snpcalling_$(date +%d-%m); cd snpcalling_$(date +%d-%m)
+
+TARGETref=refseqs_1046_manedt.fa
+OUTNAME=BBSWA1-3vs1046MusA
+
+INNAME1=SWA1vs1046genes
+INNAME2=SWA2vs1046genes
+INNAME3=SWA3vs1046genes
+
+cp ../${INNAME1}/${INNAME1}.coordSorted_RGh.raln.recal3.sorted.Srmdup.ba* ./
+cp ../${INNAME2}/${INNAME2}.coordSorted_RGh.raln.recal3.sorted.Srmdup.ba* ./
+cp ../${INNAME3}/${INNAME3}.coordSorted_RGh.raln.recal3.sorted.Srmdup.ba* ./
+cp /scratch/nine/cov_musagenesAug14/RG.txt ./
+
+cp /scratch/nine/cov_musagenesAug14/$TARGETref ./
+
+CreateSequenceDictionary.jar R=$TARGETref O=${TARGETref}.dict
+cp ${TARGETref}.dict refseqs_1046_manedt.dict
+
+samtools faidx $TARGETref
+
+# Using Gatk Haplotype Caller to discover all low confidence SNPs'
+
+GenomeAnalysisTK.jar -T HaplotypeCaller \
+-R $TARGETref \
+-I ${INNAME1}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam \
+-I ${INNAME2}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam \
+-I ${INNAME3}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam \
+-gt_mode DISCOVERY \
+-stand_call_conf 3 \
+-stand_emit_conf 4 \
+-minPruning 5 \
+-nda \
+-ploidy 2 \
+-A Coverage -A MappingQualityZero -A FisherStrand -A QualByDepth -A DepthPerAlleleBySample \
+-A ChromosomeCounts -A VariantType \
+-o ${OUTNAME}.gatkHC_LQ.raw.snps.indels_scc3_sec4.vcf
+
+GenomeAnalysisTK.jar -T SelectVariants \
+-R $TARGETref \
+-V ${OUTNAME}.gatkHC_LQ.raw.snps.indels_scc3_sec4.vcf \
+-selectType SNP \
+-o ${OUTNAME}.gatkHC_LQ.raw.snps_scc3_sec4.vcf 
+
+### hard filtering
+
+GenomeAnalysisTK.jar -T VariantFiltration \
+-R $TARGETref \
+-V ${OUTNAME}.gatkHC_LQ.raw.snps_scc3_sec4.vcf \
+-filterName "HARD_TO_VALIDATE" -filter "MQ0 >= 4 && ((MQ0 / (1.0 * DP)) > 0.1)" \
+-filterName "HighFS" -filter "FS > 30.0" \
+-filterName "LowQD" -filter "QD < 2.0" \
+-filterName "LowCoverage" -filter "DP < 5" \
+-filterName "VeryLowQual" -filter "QUAL < 30.0" \
+-filterName "LoQual" -filter "QUAL > 30.0 && QUAL < 50.0" \
+-filterName "noSNP" -filter "AF=='1.00'" \
+-o ${OUTNAME}.gatkHC_LQ.snps_scc3_sec4_7filters.vcf
+
+# Using Gatk Haplotype Caller to discover high confidence SNPs for variant calibration
+
+GenomeAnalysisTK.jar -T HaplotypeCaller \
+-R $TARGETref \
+-I ${INNAME1}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam \
+-I ${INNAME2}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam \
+-I ${INNAME3}.coordSorted_RGh.raln.recal3.sorted.Srmdup.bam \
+-gt_mode DISCOVERY \
+-stand_call_conf 20 \
+-stand_emit_conf 20 \
+-minPruning 5 \
+-nda \
+-ploidy 2 \
+-A Coverage -A MappingQualityZero -A FisherStrand -A QualByDepth -A DepthPerAlleleBySample \
+-A ChromosomeCounts -A VariantType \
+-o ${OUTNAME}.gatkHC_LQ.raw.snps.indels_scc20_sec20.vcf &
+
+# Apply stringent quality filters
+  
+GenomeAnalysisTK.jar -T VariantFiltration \
+-R $TARGETref \
+-V ${OUTNAME}.gatkHC_HQ.raw.snps_scc20_sec20.vcf \
+-window 35 -cluster 3 \
+-filterName "HARD_TO_VALIDATE" -filter "MQ0 >= 4 && ((MQ0 / (1.0 * DP)) > 0.1)" \
+-filterName "HighFS" -filter "FS > 30.0" \
+-filterName "LowQD" -filter "QD < 2.0" \
+-filterName "LowCoverage" -filter "DP < 10" \
+-filterName "VeryLowQual" -filter "QUAL < 30.0" \
+-filterName "LoQual" -filter "QUAL > 30.0 && QUAL < 50.0" \
+-filterName "medQual" -filter "QUAL < 500" \
+-filterName "NAllsamples" -filter "AN < '6'" \
+-filterName "noSNP" -filter "AF=='1.00'" \
+-o ${OUTNAME}.gatkHC_HQ.snps_scc20_sec20_10filters.vcf
+
+cat ${OUTNAME}.gatkHC_HQ.snps_scc20_sec20_10filters.vcf | grep 'PASS\|^#' > highQualSNPS.vcf
+
+# VariantRecalibration
+INPUT=BBSWA1-3vs1046MusA.gatkHC_LQ.snps_scc3_sec4_7filters.vcf
+
+GenomeAnalysisTK.jar -T VariantRecalibrator \
+-R $TARGETref \
+-input $INPUT \
+-resource:concordantSet,known=true,training=true,truth=true,prior=10.0 highQualSNPS.vcf \
+-an QD -an MQRankSum -an ReadPosRankSum -an FS -an MQ \
+-mode SNP \
+--maxGaussians 4 \
+-recalFile VQSR.recal \
+-tranchesFile VQSR.tranches \
+-rscriptFile VQSR.plots.R \
+-tranche 100.0 -tranche 99.9 -tranche 99.0 -tranche 90.0 \
+--ignore_filter HARD_TO_VALIDATE \
+--ignore_filter LoQual \
+--ignore_filter SNPcluster \
+--ignore_filter medQual
+
+# Apply Recalibration
+
+GenomeAnalysisTK.jar -T ApplyRecalibration \
+-R $TARGETref \
+-input BBSWA1-3vs1046MusA.gatkHC_LQ.snps_scc3_sec4_7filters.vcf \
+--ts_filter_level 99.0 \
+-mode SNP \
+--ignore_filter HARD_TO_VALIDATE \
+--ignore_filter LoQual \
+--ignore_filter SNPcluster \
+--ignore_filter medQual \
+-tranchesFile VQSR.tranches \
+-recalFile VQSR.recal \
+-o BBSWA1-3vs1046MusA.gatkHC_LQ.snps_scc3_sec4_7filters.recal.vcf
+
+# ReadBackedPhasing = physical phasing by read information
+
+GenomeAnalysisTK.jar -T ReadBackedPhasing \
+-R $TARGETref \
+-I ${OUTNAME}.bammerged.realn.sorted.bam \
+-V ${OUTNAME}.gatkHC_LQ.snps_scc3_sec4_7filters.recal.vcf \
+--phaseQualityThresh 20.0 \
+-o ${OUTNAME}.gatkHC_LQ.snps_scc3_sec4_7filters.recal.phased.vcf
+
+# grep PASS SNPs as final output
+
+cat ${OUTNAME}.gatkHC_LQ.snps_scc3_sec4_7filters.recal.phased.withPost.AC.vcf | grep 'PASS\|^#' > ${OUTNAME}.gatkHC_LQ.snps_scc3_sec4_7filters.recal.phased.withPost.AC_grepas.vcf
+
+# Select only SWA1 + SWA2
+
+```
+
+##  Organelle marker
+
+```{r, engine='bash', eval=FALSE}
+# script Snp_calling_Plastid_11-12
+
+# Problem are RNA editing sites which can produce bi-allelic variation in the RNA seq data
+
+# set working directory and input files
+
+cd /scratch/nine/cov_musagenesAug14/plastid
+mkdir snpcalling_$(date +%d-%m); cd snpcalling_$(date +%d-%m)
+
+TARGETref=refseq84cp40mtPhoDcds.fa
+OUTNAME=BBSWA1-3vs124pl
+
+INNAME1=SWA1vs124plgenes
+INNAME2=SWA2vs124plgenes
+INNAME3=SWA3vs124plgenes
+
+cp ../${INNAME1}/${INNAME1}.coordSorted_RGh.raln.recal3.sorted.Srmdup.ba* ./
+cp ../${INNAME2}/${INNAME2}.coordSorted_RGh.raln.recal3.sorted.Srmdup.ba* ./
+cp ../${INNAME3}/${INNAME3}.coordSorted_RGh.raln.recal3.sorted.Srmdup.ba* ./
+cp /scratch/nine/cov_musagenesAug14/RG.txt ./
+
+cp /scratch/nine/cov_musagenesAug14/$TARGETref ./
+
+CreateSequenceDictionary.jar R=$TARGETref O=${TARGETref}.dict
+cp ${TARGETref}.dict refseq84cp40mtPhoDcds.dict
+
+samtools faidx $TARGETref
+
+# Perform diploid calling on the organelle genes with Gatk's Haplotype caller 
+
+GenomeAnalysisTK.jar -T HaplotypeCaller \
+-R $TARGETref \
+-I ${OUTNAME}.bammerged.realn.sorted.bam \
+-gt_mode DISCOVERY \
+-dontUseSoftClippedBases \
+-stand_call_conf 20 \
+-stand_emit_conf 20 \
+-minPruning 5 \
+-nda \
+-A Coverage -A MappingQualityZero -A FisherStrand -A QualByDepth -A DepthPerAlleleBySample \
+-A ChromosomeCounts -A VariantType \
+-ploidy 2 \
+-o ${OUTNAME}.gatkHC.raw.snps.indels_scc20_sec20.vcf
+
+# Select only SNP (which also includes Multi-allelic SNPs)
+
+GenomeAnalysisTK.jar -T SelectVariants \
+-R $TARGETref \
+-V ${OUTNAME}.gatkHC.raw.snps.indels_scc20_sec20.vcf \
+-selectType SNP \
+-o ${OUTNAME}.gatkHC.raw.snps_scc20_sec20.vcf 
+
+# Hard filtering (Variant calibration is not possible here)
+
+GenomeAnalysisTK.jar -T VariantFiltration \
+-R $TARGETref \
+-V ${OUTNAME}.gatkHC.raw.snps_scc20_sec20.vcf  \
+-filterName "HARD_TO_VALIDATE" -filter "MQ0 >= 4 && ((MQ0 / (1.0 * DP)) > 0.1)" \
+-filterName "HighFS" -filter "FS > 30.0" \
+-filterName "LowQD" -filter "QD < 2.0" \
+-filterName "LowCoverage" -filter "DP < 5" \
+-filterName "VeryLowQual" -filter "QUAL < 30.0" \
+-filterName "LoQual" -filter "QUAL > 30.0 && QUAL < 50.0" \
+-filterName "noSNP" -filter "AF=='1.00'" \
+-o ${OUTNAME}.gatkHC.snps.scc20_sec20_7filters.vcf
+
+# ReadBackedPhasing
+
+GenomeAnalysisTK.jar -T ReadBackedPhasing \
+-R $TARGETref \
+-I ${OUTNAME}.bammerged.realn.sorted.bam \
+-V ${OUTNAME}.gatkHC.snps.scc20_sec20_7filters.vcf \
+--phaseQualityThresh 20.0 \
+-o ${OUTNAME}.gatkHC.snps.scc20_sec20_7filters.phased.vcf
+
+# # Haploid calling of variants in 124 organelle genes
+# 
+# GenomeAnalysisTK.jar -T HaplotypeCaller \
+# -R $TARGETref \
+# -I ${OUTNAME}.bammerged.realn.sorted.bam \
+# -gt_mode DISCOVERY \
+# -dontUseSoftClippedBases \
+# -stand_call_conf 20 \
+# -stand_emit_conf 20 \
+# -minPruning 5 \
+# -nda \
+# -A Coverage -A MappingQualityZero -A FisherStrand -A QualByDepth -A DepthPerAlleleBySample \
+# -A ChromosomeCounts -A VariantType \
+# -ploidy 1 \
+# -o ${OUTNAME}.gatkHC.raw.1n.snps.indels_scc20_sec20.vcf
+# 
+# # Select SNPs
+# 
+# GenomeAnalysisTK.jar -T SelectVariants \
+# -R $TARGETref \
+# -V ${OUTNAME}.gatkHC.raw.1n.snps.indels_scc20_sec20.vcf \
+# -selectType SNP \
+# -o ${OUTNAME}.gatkHC.raw.1n.snps_scc20_sec20.vcf 
+# 
+# # Hard filtering
+# 
+# GenomeAnalysisTK.jar -T VariantFiltration \
+# -R $TARGETref \
+# -V ${OUTNAME}.gatkHC.raw.1n.snps_scc20_sec20.vcf  \
+# -filterName "HARD_TO_VALIDATE" -filter "MQ0 >= 4 && ((MQ0 / (1.0 * DP)) > 0.1)" \
+# -filterName "HighFS" -filter "FS > 30.0" \
+# -filterName "LowQD" -filter "QD < 2.0" \
+# -filterName "LowCoverage" -filter "DP < 5" \
+# -filterName "VeryLowQual" -filter "QUAL < 30.0" \
+# -filterName "LoQual" -filter "QUAL > 30.0 && QUAL < 50.0" \
+# -filterName "noSNP" -filter "AF=='1.00'" \
+# -o ${OUTNAME}.gatkHC.1n.snps.scc20_sec20_7filters.vcf
+# 
+# # Phasing
+# 
+# GenomeAnalysisTK.jar -T ReadBackedPhasing \
+# -R $TARGETref \
+# -I ${OUTNAME}.bammerged.realn.sorted.bam \
+# -V ${OUTNAME}.gatkHC.1n.snps.scc20_sec20_7filters.vcf \
+# --phaseQualityThresh 20.0 \
+# -o ${OUTNAME}.gatkHC.1n.snps.scc20_sec20_7filters.phased.vcf
+
+# Select only homozygous variants
+# CT/TC -> RNA editing sites
+
+cp /scratch/nine/cov_musagenesAug14/codon-table_noh.txt ./
+cp /scratch/nine/cov_musagenesAug14/refseq84cp40mtPhoDcds_sl_b.cds ./
+
+cat BBSWA12vs124pl.cp.2n.finalSnps_ef_AF.vcf | grep -v "0/1" > BBSWA12vs124pl.cp.2n.finalSnps_ef_AF_TrueSNPs.vcf
+
+```
+
+##  Variant annotation
+
+Apply python script to annotate variants as changing amino acid codon or not at their position. Here exemplified for the chloroplast region.
+
+```{r, engine='bash', eval=FALSE}
+# Prepare vcf file for variant annotation
+
+cat BBSWA12vs124pl.cp.2n.finalSnps_ef_AF_TrueSNPs.vcf | grep "^#" > header.synNonsyn.vcf
+cat header.synNonsyn.vcf | head -n 38 > headerHead38.synNonsyn.vcf
+echo '##INFO=<ID=COD,Number=1,Type=String,Description="Is ALT synonymous or nonsynonymous to REF">' >> headerHead38.synNonsyn.vcf 
+cat header.synNonsyn.vcf | tail -n 127 > headerTail127.synNonsyn.vcf
+cat BBSWA12vs124pl.cp.2n.finalSnps_ef_AF_TrueSNPs.vcf | grep "^NC" > input.synNonsyn.vcf
+
+python2.6 /scratch/nine/cov_musagenesAug14/synNonSyn_JM2.py refseq84cp40mtPhoDcds_sl_b.cds codon-table_noh.txt input.synNonsyn.vcf output.synNonsyn.vcf
+
+cat headerHead38.synNonsyn.vcf headerTail127.synNonsyn.vcf output.synNonsyn.vcf > BBSWA12vs124pl.cp.2n.finalSnps_ef_AF_TrueSNPs.codanno.vcf
+
+```
+
+# Select target single nucleotide polymorphisms and their surrounding RNA sequence for amplicon design
+
+Criteria:
+
+1.  fixed target SNPs
+2.  within matching exon and flanking region of 80 bp
+    + remove (-) strand exon matches
+3.  candidate (adaptive potential) gene list & non-syn SNP
+    + neutral candidate gene list and syn SNP
+4.  primer oligos
+
+```{r, engine='bash', eval=FALSE}
+# 1. Extract fixed polymorphisms
+
+# 2. Extract targets within exons
+
+# INPUT: 
+
+# blast MUSAexons vs BB_refseq1042:
+# file_blast2=open('MAevsrefseq1046.rmErr.sel1042.oft6.tblx.w_pct_hit_length','r')
+
+# vcf file containing targeted SNPs: 
+# file_tarvcf=open('BBSWA12vs1046MusA.finalSnps_ef_AF.codanno_fixedSNPs_sub730loci.wh.vcf','r')
+
+# vcf file containing all SNPs within targeted loci:
+# file_allvcf=open('BBSWA12vs1046MusA.finalSnps_ef_AF.codanno_sub730loci.wh.vcf','r')
+
+python exon_script04.py
+
+# OUTPUT:
+
+# table targetedSNPs_730loci_80flank_09-02.list
+# vcf file acceptedSNPs_730loci_80flank_09-02.vcf
+
+# remove '-' strand exons from targetedSNPs_730loci_80flank_09-02.txt 
+# 727 remaining
+
+
+# 3. Select candidate genes 
+
+# marker with more syn than non-syn SNPs:  neutralmarker139.greplist
+# marker with relevant annotations:       fix.GO.allNS153.greplist
+
+# annotate the list as: 
+
+grep -f neutralmarker139.greplist targetedSNPs_730loci_80flank_09-02.txt | grep -v nonsyn > targetedSNPs_730loci_80flank_09-02.Nesyn.txt
+	
+grep -f fix.GO.allNS153.greplist targetedSNPs_730loci_80flank_09-02.txt | grep -v :syn > targetedSNPs_730loci_80flank_09-02.Gononsyn.txt
+	
+cat targetedSNPs_730loci_80flank_09-02.Nesyn.txt targetedSNPs_730loci_80flank_09-02.Gononsyn.txt | cut -f 1 | sort | uniq > targetedSNPs_730loci_80flank_09-02.NO.greplist
+
+grep -f targetedSNPs_730loci_80flank_09-02.NO.greplist targetedSNPs_730loci_80flank_09-02.txt > targetedSNPs_730loci_80flank_09-02.NOanno.txt
+
+# -> add column "ANNOT" with either blank, neutral, or Goflower in excel, remove (-) strand exon matches
+	
+# 232loci.greplist = candidate gene list; genes for which the equivalent SNPs were present
+
+grep -f 232loci.greplist targetedSNPs_267loci_80flank_09-02.annot.txt > targetedSNPs_232loci_447SNP_80flank_09-02.annot.txt
+
+```
+
+This list of 232 target regions, in which we higlighted the target SNPs and surrounding variants was provided to the Barts and London Genome Centre to design and order the primers.
+
+# Evaluating re-sequencing success
+
+##  Steps from raw MiSeq reads to genotypes
+
+1.  Trim adapters and poor quality bases
+2.  Realign reads to the reference and improve alignment files
+
+```{r, engine='bash', eval=FALSE}
+# script trim_align_gvcf.sh
+# usage time ./trim_align_gvcf.sh pairs_input.XX > trim_align_gvcf_XX.$(date +%d-%m).log.txt 2> trim_align_gvcf_XX.err.txt
+# START in /data/scratch/btw680/analyses/reseq_ana/all_files/allRAW/
+# version March 2016
+
+ID=sample_name
+OUTFOLD=output_folder_batch
+
+cd /data/scratch/btw680/analyses/reseq_ana/all_files/allRAW/
+mkdir $OUTFOLD
+
+# Palindrome method, but maintaining forward and reverse reads per sample.
+
+trimmomatic-0.33.jar PE -phred33 \
+${ID}.R1.fastq.gz ${ID}.R1.fastq.gz \ # raw input reads
+${OUTFOLD}/${ID}.R1.trim_PE.fastq ${OUTFOLD}/${ID}.R1.trim_sing.fastq \ # output 
+${OUTFOLD}/${ID}.R2.trim_PE.fastq ${OUTFOLD}/${ID}.R2.trim_sing.fastq \ # output
+ILLUMINACLIP:/data/scratch/btw680/analyses/reseq_ana/all_files/adapters/TruSeq3-PE-2.fa:2:30:10:1:TRUE ILLUMINACLIP:/data/scratch/btw680/analyses/reseq_ana/all_files/adapters/myBPrimer300.fa:2:30:10:1:TRUE \
+ILLUMINACLIP:/data/scratch/btw680/analyses/reseq_ana/all_files/adapters/myBPrimer300_rc.fa:2:30:10:1:TRUE \
+MINLEN:100 AVGQUAL:30 > ${OUTFOLD}/${ID}_trimmo_${S}.log.txt 2>&1
+
+# Realignment paired-end trimmed data using Trinity's wrapper script
+# bowtie2
+
+LEFT=${ID}.R1.trim_PE.fastq
+RIGHT=${ID}.R2.trim_PE.fastq
+TARGETref=refseq_gene236.fa # design reference sequences
+
+alignReads.pl --left $LEFT --right $RIGHT --seqType fq --target $TARGETref --retain_SAM_files --output ${OUTNAME} --aligner bowtie2 -- -p 16 --dovetail --very-sensitive-local > ${ID}_realign_$(date +%d-%m).log.txt 2>&1
+
+# Provide read group header for the bam file
+OUTNAME=${ID}.vs236
+POPID=$(sed 's/-.*//' <<< $ID)
+
+samtools view -hS -t target.fa.fai ${OUTNAME}.coordSorted.sam -o ${OUTNAME}.coordSorted_header.sam
+AddOrReplaceReadGroups.jar I=${OUTNAME}.coordSorted_header.sam O=${OUTNAME}.coordSorted_RGh.sam SO=coordinate ID=${ID} PL=ILLUMINA SM=${ID} LB=L001 PU=${POPID} CREATE_INDEX=true
+samtools view -bhS ${OUTNAME}.coordSorted_RGh.sam > ${OUTNAME}.coordSorted_RGh.bam
+samtools index ${OUTNAME}.coordSorted_RGh.bam
+
+# Realign reads around indels using Gatk
+
+GenomeAnalysisTK.jar -T RealignerTargetCreator -R $TARGETref -dt NONE \ 
+-I ${OUTNAME}.coordSorted_RGh.bam -o ${OUTNAME}.coordSorted_RGh.intervals
+
+GenomeAnalysisTK.jar -T IndelRealigner -R $TARGETref -dt NONE -I ${OUTNAME}.coordSorted_RGh.bam \
+-targetIntervals ${OUTNAME}.coordSorted_RGh.intervals \
+-o ${OUTNAME}.coordSorted_RGh.realn.bam
+
+samtools index ${OUTNAME}.coordSorted_RGh.realn.bam
+
+samtools sort ${OUTNAME}.coordSorted_RGh.realn.bam ${OUTNAME}.coordSorted_RGh.realn.sorted
+samtools index ${OUTNAME}.coordSorted_RGh.realn.sorted.bam
+
+# Recalibrate the base quality score (carried out for three times)
+
+GenomeAnalysisTK.jar -T UnifiedGenotyper -dt NONE \
+-I ${OUTNAME}.coordSorted_RGh.realn.sorted.bam -R $TARGETref -glm BOTH \
+-o ${OUTNAME}.coordSorted_RGh.realn.sorted.raw.vcf
+
+GenomeAnalysisTK.jar -T BaseRecalibrator -dt NONE \
+-I ${OUTNAME}.coordSorted_RGh.realn.sorted.bam -R $TARGETref \
+-knownSites ${OUTNAME}.coordSorted_RGh.realn.sorted.raw.vcf --maximum_cycle_value 800 \
+-o ${OUTNAME}.coordSorted_RGh.realn.sorted.recal_data.before.grp
+
+GenomeAnalysisTK.jar -T PrintReads -R $TARGETref -dt NONE \
+-I ${OUTNAME}.coordSorted_RGh.realn.sorted.bam \ 
+-BQSR ${OUTNAME}.coordSorted_RGh.realn.sorted.recal_data.before.grp \
+-o ${OUTNAME}.coordSorted_RGh.realn.sorted.recal.bam
+
+# final read alignment file: ${OUTNAME}.coordSorted_RGh.realn.sorted.recal3.bam
+
+```
+
+3.  Variant discovery and genotype calling for expected diploid marker (gvcf method -> see Gatk)
+
+```{r, engine='bash', eval=FALSE}
+# script samplemerge_call_all331.sh (defunct)
+# script gvcf_cal_Mrz-17
+
+# Variant discovery by sample read alignment
+## maximum of alternative alleles based on assumed diploidy
+## samples 262-B-01-CPG and 352-02-CPG removed because of polyploidy
+## removing reads with a mapping quality below 44 (a maximum of 5% of total reads)
+## maintain only variants of base quality > 20 (might be too specific)
+## annotate variants with presence in transcriptome (sammples SWA1 vs SWA2) and selection as target (ie fixed between parents) SNP
+
+INTERV=/data/scratch/btw680/analyses/reseq_ana/all_files/amplicon_pic_300ampl.list # eg call variants within all 300 designed amplicons
+# INTERV=amplicon_pic_14organelle_good.list     # good organelle amplicons => haploid calling
+# INTERV=amplicon_pic_184nuclear_good.list      # good amplicons => diploid calling
+TARGETref=refseq_gene236.fa # design bluebell reference sequences reduced to selected loci
+dbSNP=/data/scratch/btw680/analyses/reseq_ana/all_files/allRAW/dbSNP_IDannot.vcf 
+
+GenomeAnalysisTK.jar -T HaplotypeCaller \
+-R $TARGETref \
+-L $INTERV \
+-AR $INTERV \
+-D $dbSNP \
+-I ${ID}.vs236.coordSorted_RGh.realn.sorted.recal3.bam \
+-ERC GVCF \
+-dt NONE \
+-gt_mode DISCOVERY \
+-nda \
+-ploidy 2 \
+-mmq 44 \
+-mbq 20 \
+--max_alternate_alleles 2 \
+-bamWriterType CALLED_HAPLOTYPES -dontTrimActiveRegions -forceActive \
+-dontUseSoftClippedBases \
+-A Coverage -A MappingQualityZero -A FisherStrand -A QualByDepth -A DepthPerAlleleBySample \
+-A ChromosomeCounts -A VariantType -A DepthPerSampleHC -A AlleleCountBySample -A StrandBiasBySample -A GenotypeSummaries \
+-bamout ${OUTNAME}/${ID}.gatkHC.calledHaplotypes.bam \
+-o ${OUTNAME}/${ID}.gatkHC.raw.mmq44.mbq20.g.vcf
+
+# -V gvcf.list # list of samples to be included -> 
+ls *.gatkHC.raw.mmq44.mbq20.g.vcf > gvcf.list
+ID=sample325
+
+time GenomeAnalysisTK.jar -T GenotypeGVCFs \
+-R $TARGETref \
+-L $INTERV \
+-D $dbSNP \
+-V gvcf.list \
+-dt NONE \
+-nt 8 \
+-stand_call_conf 30 \
+-stand_emit_conf 10 \
+-nda \
+--max_alternate_alleles 20 \
+-A Coverage -A MappingQualityZero -A FisherStrand -A QualByDepth -A DepthPerAlleleBySample -A InbreedingCoeff \
+-A ChromosomeCounts -A VariantType -A DepthPerSampleHC -A AlleleCountBySample -A StrandBiasBySample -A GenotypeSummaries \
+-o ${ID}.gatkgHC.raw.snps.indels_scc30_sec10_300ampl.vcf 
+
+GenomeAnalysisTK.jar -T ValidateVariants \
+-R $TARGETref \
+-V ${ID}.gatkgHC.raw.snps.indels_scc30_sec10_300ampl.vcf
+
+```
+
+4.  Variant filtration
+
+```{r, engine='bash', eval=FALSE}
+# High Quality SNPs to be used in variant recalibration'
+
+INTERV=/data/scratch/btw680/analyses/reseq_ana/all_files/interval_pic_184nuclear_good.list
+# = Processing 24464 bp from intervals 
+TARGETref=refseq_gene236.fa # designed bluebell reference sequences reduced to selected loci
+
+GenomeAnalysisTK.jar -T VariantFiltration \
+-R $TARGETref \
+-dt NONE \
+-L $INTERV \
+-V ${ID}.gatkgHC.raw.snps.indels_scc30_sec10_300ampl.vcf \
+-filterName "HARD_TO_VALIDATE" -filter "MQ0 >= 4 && ((MQ0 / (1.0 * DP)) > 0.1)" \
+-filterName "HighFS" -filter "FS > 30.0" \
+-filterName "LowQD" -filter "QD < 2.0" \
+-filterName "LowCoverage" -filter "DP < 10" \
+-filterName "VeryLowQual" -filter "QUAL < 30.0" \
+-filterName "LoQual" -filter "QUAL > 30.0 && QUAL < 50.0" \
+-filterName "medQual" -filter "QUAL < 1000" \
+-filterName "noSNP" -filter "AF=='1.00'" \
+-cluster 3 -window 5 \
+- ef \ 
+-o highQualSNPs_184nc.vcf
+
+# Variant Recalibration on SNPs gVCFcalls
+## Variant recalibrator estimates Gaussian distributions of the filter values of QD, MQ, MQRankSum, ReadPosRankSum in order to determine based on tranche threshold the number of good and poor SNPs. As guidance it is provided with high quality SNPs from the transcriptome data (dbSNP).
+
+INTERV=/data/scratch/btw680/analyses/reseq_ana/all_files/amplicon_pic_300ampl.list
+
+GenomeAnalysisTK.jar -T VariantRecalibrator \
+-R $TARGETref \
+-dt NONE \
+-L $INTERV \
+-input ${ID}.gatkgHC.raw.snps.indels_scc30_sec10_300ampl.vcf \
+-resource:targetSet,known=true,training=true,truth=true,prior=10.0 /scratch/nine/cov_musagenesAug14/bangen/snpcalling_09-04/target.vcf \
+-resource:highQual,known=true,training=true,truth=true,prior=10.0 highQualSNPs_184nc.vcf \
+-resource:dbSNPs,known=true,training=false,truth=false,prior=2.0 /scratch/nine/cov_musagenesAug14/bangen/snpcalling_09-04/dbSNP_236genes.vcf \
+-an QD -an MQ -an MQRankSum -an ReadPosRankSum \
+-mode SNP \
+--maxGaussians 4 \
+--minNumBadVariants 5000 \
+-recalFile VQSR.recal \
+-tranchesFile VQSR.tranches \
+-rscriptFile VQSR.plots.R \
+-tranche 100.0 -tranche 99.9 -tranche 99.0 -tranche 90.0
+
+GenomeAnalysisTK.jar -T ApplyRecalibration \
+-R $TARGETref \
+-dt NONE \
+-L $INTERV \
+-input ${ID}.gatkgHC.raw.snps.indels_scc30_sec10_300ampl.vcf \
+--ts_filter_level 90.0 \
+-mode SNP \
+-tranchesFile VQSR.tranches \
+-recalFile VQSR.recal \
+-o ${ID}.gatkgHC.snps.indels_scc30_sec10_300ampl.SNPrecal90.vcf
+
+# and also apply hard filtration
+
+GenomeAnalysisTK.jar -T VariantFiltration \
+-R $TARGETref \
+-L $INTERV \
+-dt NONE \
+-V ${ID}.gatkgHC.snps.indels_scc30_sec10_300ampl.SNPrecal90.vcf \
+-filterName "HARD_TO_VALIDATE" -filter "MQ0 >= 4 && ((MQ0 / (1.0 * DP)) > 0.1)" \
+-filterName "HighFS" -filter "FS > 30.0" \
+-filterName "LowCoverage" -filter "DP < 10" \
+-filterName "VeryLowQual" -filter "QUAL < 30.0" \
+-filterName "noSNP" -filter "AF=='1.00'" \
+-o ${ID}.gatkgHC.snps.indels_scc30_sec10_300ampl.SNPrecal90_7filt.vcf
+
+# select only variants which are called in 70% of the samples (ie no-call rate below 30%)
+# remove sites with more than 30% no-call (325*2 * (1-0.3))
+nocall=455
+
+GenomeAnalysisTK.jar -T SelectVariants \
+-R $TARGETref \
+-V ${ID}.gatkgHC.snps.indels_scc30_sec10_300ampl.SNPrecal90_7filt.vcf \
+-L $INTERV \
+-select "AN > $nocall" \
+-env \
+-o ${ID}.gatkgHC.snps.indels_scc30_sec10_300interv.SNPrecal90_7filt_AN455.vcf
+
+```
+
+The final vcf file (version 4.2) contains all different variant types for 325 samples, which can be sub-selected afterwards for data analyses and visualisation. 
+
+5. Variant discovery and filtration for the expected haploid (ie organelle) markers
+
+```{r, engine='bash', eval=FALSE}
+# script gvcf_call_1stStep_haploid_Apr-16.sh
+OUTNAME=gvcffiles_haploid_Apr-16
+mkdir $OUTNAME
+
+# Gatk: variant discovery of single-sample gVCFs for haploid marker
+INPUT=samples.list
+INTERV=/data/scratch/btw680/analyses/reseq_ana/all_files/amplicon_pic_15org.list
+
+cat $INPUT | while read line; \
+do ID=$(sed 's/\..*$//' <<< $line); \
+
+GenomeAnalysisTK.jar -T HaplotypeCaller \
+-R $TARGETref \
+-L $INTERV \
+-AR $INTERV \
+-D $dbSNP \
+-I ${ID}.vs236.coordSorted_RGh.realn.sorted.recal3.bam \
+-ERC GVCF \
+-dt NONE \
+-gt_mode DISCOVERY \
+-nda \
+-ploidy 1 \
+-mmq 44 \
+-mbq 20 \
+--max_alternate_alleles 1 \
+-bamWriterType CALLED_HAPLOTYPES -dontTrimActiveRegions -forceActive \
+-dontUseSoftClippedBases \
+-A Coverage -A MappingQualityZero -A FisherStrand -A QualByDepth -A DepthPerAlleleBySample \
+-A ChromosomeCounts -A VariantType -A DepthPerSampleHC -A AlleleCountBySample -A StrandBiasBySample -A GenotypeSummaries \
+-bamout ${OUTNAME}/${ID}.gatkHC.calledHaplotypes.bam \
+-o ${OUTNAME}/${ID}.gatkHC.raw.mmq44.mbq20.g.vcf; \
+
+done
+
+# Joint genotyping gVCF -> VCF
+cd $OUTNAME
+ls *.gatkHC.raw.mmq44.mbq20.g.vcf > gvcf.list
+ID=Nsamples
+
+dbSNP=/data/scratch/btw680/analyses/reseq_ana/all_files/allRAW/dbSNP_IDannot.vcf 
+
+time GenomeAnalysisTK.jar -T GenotypeGVCFs \
+-R $TARGETref \
+-L $INTERV \
+-D $dbSNP \
+-V gvcf.list \
+-dt NONE \
+-nt 8 \
+-stand_call_conf 30 \
+-stand_emit_conf 10 \
+-nda \
+--max_alternate_alleles 20 \
+-A Coverage -A MappingQualityZero -A FisherStrand -A QualByDepth -A DepthPerAlleleBySample -A InbreedingCoeff \
+-A ChromosomeCounts -A VariantType -A DepthPerSampleHC -A AlleleCountBySample -A StrandBiasBySample -A GenotypeSummaries \
+-o ${ID}.gatkgHC.raw.snps.indels_scc30_sec10_15org.vcf 
+
+GenomeAnalysisTK.jar -T ValidateVariants \
+-R $TARGETref \
+-V ${ID}.gatkgHC.raw.snps.indels_scc30_sec10_15org.vcf
+
+# Apply hard filtering and select SNPs
+## -> within the amplicons = interval (length excl primers)
+## -> remove sites with more than 30% no-call (71 * (1-0.3))
+nocall=50
+
+INTERV=/data/scratch/btw680/analyses/reseq_ana/all_files/interval_pic_15org.list
+
+GenomeAnalysisTK.jar -T VariantFiltration \
+-R $TARGETref \
+-L $INTERV \
+-dt NONE \
+-V ${ID}.gatkgHC.raw.snps.indels_scc30_sec10_15org.vcf \
+-filterName "HARD_TO_VALIDATE" -filter "MQ0 >= 4 && ((MQ0 / (1.0 * DP)) > 0.1)" \
+-filterName "HighFS" -filter "FS > 30.0" \
+-filterName "LowCoverage" -filter "DP < 10" \
+-filterName "VeryLowQual" -filter "QUAL < 30.0" \
+-filterName "noSNP" -filter "AF=='1.00'" \
+-o ${ID}.gatkgHC.snps.indels_scc30_sec10_15org_7filt.vcf
+
+GenomeAnalysisTK.jar -T SelectVariants \
+-R $TARGETref \
+-L $INTERV \
+-V ${ID}.gatkgHC.snps.indels_scc30_sec10_15org_7filt.vcf \
+-ef \
+-selectType SNP \
+-select "AN > $nocall" \
+-o ${ID}.gatkgHC.biSNPs_scc30_sec10_15org_8filt_AN50.vcf
+
+```
+
+
+The final vcf file (version 4.2) contains all different variant types for 325 samples, which can be sub-selected afterwards for data analyses and visualisation. 
+
+List of data manipulation options:
+
+* IGV
+* $HOME/software/vcftools_0.1.12b/bin/vcftools --vcf $VCFinput --012 --out samples-325
+    + R
+  
+```{r, engine='bash', eval=FALSE}
+#script gvcf_cal_Mrz-17.sh
+
+TARGETref=/data/scratch/btw680/analyses/reseq_ana/all_files/allRAW/all336/refseq_gene236.fa
+INTERV=/data/scratch/btw680/analyses/reseq_ana/all_files/interval_pic_300ampl_A.list 
+ID=sample325
+
+# select only variants which are called in 70% of the samples (ie no-call rate below 30%)
+# remove sites with more than 30% no-call (71*2 * (1-0.3))
+nocall=99
+
+# select only PASS biallelic SNPs for the 71 marker paper samples
+
+GenomeAnalysisTK.jar -T SelectVariants \
+-R $TARGETref \
+-V ${ID}.gatkgHC.snps.indels_scc30_sec10_300interv.SNPrecal90_7filt_AN455.phasedMNP.vcf \
+-L $INTERV \
+-sf markerPaperSample.list \
+-env -ef \
+-trimAlternates \
+-selectType SNP \
+-select "AN > $nocall" \
+-o samples71.gatkgHC.SNPs.scc30_sec10_300interv.SNPrecal90_7filt_AN99.phasedMNP.vcf
+
+grep -v MULTIALLELIC_SNP samples71.gatkgHC.SNPs.scc30_sec10_300interv.SNPrecal90_7filt_AN455.phasedMNP.vcf > samples71.gatkgHC.biSNPs.scc30_sec10_300interv.SNPrecal90_7filt_AN455.phasedMNP.vcf
+
+GenomeAnalysisTK.jar -T ValidateVariants \
+-R $TARGETref \
+-V samples71.gatkgHC.biSNPs.scc30_sec10_300interv.SNPrecal90_7filt_AN455.phasedMNP.vcf
+
+GenomeAnalysisTK.jar -T VariantsToTable \
+-R $TARGETref \
+-L $INTERV \
+-V $VCFinput \
+-F CHROM -F POS -F ID -F REF -F ALT \
+-F NO-CALL -F HOM-REF -F HOM-VAR -F HET \
+-F AC -F AF -F AN -F VariantType \
+-GF GT \
+-o samples71.gatkgHC.biSNPs.scc30_sec10_300interv.SNPrecal90_7filt_AN455.phasedMNP.tab
+
+VCFinput=samples71.gatkgHC.biSNPs.scc30_sec10_300interv.SNPrecal90_7filt_AN455.phasedMNP.vcf
+
+/data/home/btw680/software/vcftools_0.1.12b/bin/vcftools --vcf $VCFinput --012 --out samples71.gatkgHC.biSNPs.scc30_sec10_300interv.SNPrecal90_7filt_AN455.phasedMNP
+```
+
+
+* From vcf to fastStructure input using pgdSpider2.jar
+* 012 genotype table imported into R -> script: figures_v1.R
+
+##  Population genetic analysis
+  * Fst estimates
+  * STRUCTURE co-ancestry plots
+  * Principal component analysis
+
+```{r, eval=FALSE}
+
+source('figures_v1.R')
+
+```
+
+
+****
+
+# Python and other scripts that were written/used
+
+* getting\_common\_geneXXX.py
+
+```{r, engine='python', eval=FALSE}
+#!/usr/local/bin/python2.6
+# -*- coding: utf-8 -*-
+
+import os as os
+import numpy as nu
+
+
+def Making_list(file1, file2):
+  fileBanTo2 = open(file1,'r')
+
+  fileBanTo2.next()
+  outputlist1=[]
+  seqname1=[]
+
+
+  for line in fileBanTo2:
+    element=line.rsplit('\t')
+    if float(element[(len(element)-2)]) > 80:
+      outputlist1.append(element[0])
+      seqname1.append(element[1])
+      
+  fileBanTo2.close()
+  
+  #print len(outputlist)
+  
+  file2ToBan = open(file2,'r')
+  file2ToBan.next()
+  outputlist2=[]
+  seqname2=[]
+
+  for line in file2ToBan:
+    element=line.rsplit('\t')
+    if float(element[(len(element)-2)]) > 80:
+      outputlist2.append(element[1])
+      seqname2.append(element[0])
+
+  
+  file2ToBan.close()
+  
+  outputlist=[]
+  seqname=[]
+  
+  for i in outputlist1:
+    if i in outputlist2:
+      if seqname1[outputlist1.index(i)]==seqname2[outputlist2.index(i)]:
+	outputlist.append(i)
+	seqname.append(seqname1[outputlist1.index(i)])
+	
+  
+  return [outputlist,seqname]
+
+List_Ban_Species1=Making_list("MACUMcDNA_to_DBSWA1aa.oft6.blx.w_pct_hit_length","SWA1aa_to_DBMACUMcDNA.oft6.tbln.w_pct_hit_length")
+List_Ban_Species2=Making_list("MACUMcDNA_to_DBSWA2aa.oft6.blx.w_pct_hit_length","SWA2aa_to_DBMACUMcDNA.oft6.tbln.w_pct_hit_length")
+List_Ban_Species3=Making_list("MACUMcDNA_to_DBSWA3aa.oft6.blx.w_pct_hit_length","SWA3aa_to_DBMACUMcDNA.oft6.tbln.w_pct_hit_length")
+
+List_Species1_Species2=Making_list("SWA1aa_to_DBaaSWA2.oft6.blp","SWA2aa_to_DBaaSWA1.oft6.blp")
+List_Species1_Species3=Making_list("SWA1aa_to_DBaaSWA3.oft6.blp","SWA3aa_to_DBaaSWA1.oft6.blp")
+List_Species2_Species3=Making_list("SWA2aa_to_DBaaSWA3.oft6.blp","SWA3aa_to_DBaaSWA2.oft6.blp")
+
+print len(List_Ban_Species1[0]), len(List_Ban_Species2[0]), len(List_Ban_Species3[0])
+
+output=open("SWA123_MACUM_cov80.tab",'w')
+output2=open("SWA123_MACUM_cov80_GSIDM_list.txt",'w')
+
+for i in List_Ban_Species1[0]:
+  if (i in List_Ban_Species2[0] and i in List_Ban_Species3[0]):
+    output.write(i+"\t"+List_Ban_Species1[1][List_Ban_Species1[0].index(i)]+"\t"+List_Ban_Species2[1][List_Ban_Species2[0].index(i)]+"\t"+List_Ban_Species3[1][List_Ban_Species3[0].index(i)]+"\n")
+    output2.write(i.split('|')[0]+"\n")
+
+print len(output2[0])
+```
+
+* get\_seq\_XXX.py
+
+```{r, engine='python', eval=FALSE}
+# script: python2.6 get_seq_SWA123_mtPhoDcds_cns.py 
+
+#!/usr/local/bin/python2.6
+# -*- coding: utf-8 -*-
+# author: Alexandre Blanckaert
+
+import os as os
+
+# input
+seq_name=open('SWA1-3_40mtgenesPhoD.txt','r')
+
+list_of_nameProt=[]
+list_of_nameSpec1=[]
+list_of_nameSpec2=[]
+list_of_nameSpec3=[]
+
+for line in seq_name:
+  i=line.rstrip('\n')
+  i=i.rsplit('\t')
+  list_of_nameProt.append(i[0])
+  list_of_nameSpec1.append(i[1])
+  list_of_nameSpec2.append(i[2])
+  list_of_nameSpec3.append(i[3])
+  
+def write_Fasta(input_file,list_of_name):
+  fasta_file=open(input_file,'r')
+  
+  u=fasta_file.readline()
+
+  while u:
+
+    if u[0]=='>':
+      if u.rstrip('\n')[1:] in list_of_name:
+	f=open("gene_seq_SWA123_mtPhoDcds_cns/"+list_of_nameProt[list_of_name.index(u.rstrip('\n')[1:])].replace('|','_')+".fas",'a')
+	f.write(u)
+
+	u=fasta_file.readline()
+	while u[0]!='>':
+
+	  f.write(u.rstrip('\n'))
+	  u=fasta_file.readline()
+	f.write('\n')
+	f.close()
+      else:
+	u=fasta_file.readline()
+    else:
+      u=fasta_file.readline()
+	
+  fasta_file.close()
+  
+write_Fasta('PhoD_mt_nt_cds_ren.fa',list_of_nameProt)
+write_Fasta('consensus_SWA1.fa',list_of_nameSpec1)
+write_Fasta('consensus_SWA2.fa',list_of_nameSpec2)
+write_Fasta('consensus_SWA3.fa',list_of_nameSpec3)
+
+```
+
+*  addNN.py
+
+```{r, engine='python', eval=FALSE}
+#! /usr/bin/env python
+#Usage addNNN.py input.fasta output.fasta
+
+import sys
+
+FasFile = open(sys.argv[1],'r')
+FasOut = open(sys.argv[2],'w')
+
+for line in FasFile:
+    if line[0]!='>':
+        line=line.rstrip('\n')
+        if (len(line)%3==1):
+            line=line+'NN'+'\n'
+        elif (len(line)%3==2):
+            line=line+'N'+'\n'
+        else:  line=line+'\n'
+    FasOut.write(line)
+
+```
+
+* getreferenceseqs.py
+
+```{r, engine='python', eval=FALSE}
+#! /usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+# USAGE ./getreferenceseqs.py inputfile outputfile True/False 
+# v 07/08/2014
+# This script pulls out the longest consecuative sequence of an alignment of two sequences. If SWA1 and SWA2 are of same length it prefers SWA2 over SWA1. The flag True or False determines whether you allow indels of the length one AS (=True)
+
+import sys as sys
+
+# name='../04_trin_Blast_commonGenes/03_align_prank_out/gene_seq_SWA12_no3_noMACUM_cov80/prank_output/fasta/singlelineFas/GSMUA_Achr10G00160_001_GSMUA_Achr10T00160_001.fas.best.fas'
+
+align=open(sys.argv[1],'r')
+#align=open(name,'r')
+
+fullresult=[]
+
+file_content=align.readlines()
+
+for line in file_content:
+    if line[0]!='>':
+        seq=line.rstrip('\n')
+        toprint=[]
+        
+            
+# -> count the length of indels and nucleotides for each sequence and store in toprint whereby it only recognizes situations with no larger indels in the middle  #
+        while seq.count('-')>0:
+            a=seq.index('-')
+            toprint.append(a)
+            seq=seq[a+1:]
+            counter=1
+            while (len(seq)>0 and seq[0]=='-'):
+                seq=seq[1:]
+                counter+=1
+            toprint.append(counter)
+            
+        if len(seq)>0:
+            toprint.append(len(seq))
+              
+        #print(toprint)
+        #fullresult.append(toprint)
+        
+# -> the loop to tolerate ('---') in the middle of the alignment; it will be added to the max length of the sequence #
+        
+        if sys.argv[3]:
+        #if True:
+        #print("tolerate single indel")
+            toprint2=[]
+            tracer=True
+            for i in range(len(toprint)):
+                #print toprint
+                #print toprint2
+                if i%2==0 and tracer:
+                    toprint2.append(toprint[i])
+                elif i%2==1:
+                    #print("i",i)
+                    #print len(toprint)
+                    if toprint[i]==3 and i < len(toprint)-1:
+                     #   print 'fusion'
+                        toprint2[-1]+=toprint[i]+toprint[i+1]
+                        tracer=False
+                    else: 
+                        toprint2.append(toprint[i])
+                        tracer=True
+               # else:
+                #    toprint2.append()
+                    
+            fullresult.append(toprint2)
+        else:
+            fullresult.append(toprint)
+            
+        #print(toprint)
+        #if toprint[0]=='indel':
+         #   print(max(toprint[2::2]))
+        #else:
+         #   print(max(toprint[1::2]))
+
+# -> evaluating the length of indels in each sequence and judge which sequence to copy into outfile #
+
+L1Gaps=file_content[1].count('-')
+L2Gaps=file_content[3].count('-')
+
+Cblock1=len(fullresult[0])
+Cblock2=len(fullresult[1])
+
+#outfile=open('out.fas','a')
+outfile=open(sys.argv[2],'a')
+
+#Bangene=sys.argv[1].rsplit('/')[-1].rsplit('_')[:2]
+Bangene=sys.argv[1].rsplit('/')[-1].rsplit('_')
+
+if len(Bangene)<=7:
+    Gene='>'+Bangene[0]+'_'+Bangene[1]+"|"
+else:
+    Gene='>'+Bangene[0]+'_'+Bangene[1]+'_'+Bangene[2]+"|"
+
+
+saved=False       
+# take the one with the least gaps, thus longest sequence #
+if L1Gaps>L2Gaps:
+    if Cblock2<=2 or (fullresult[1][0]==0 and Cblock2<=4):
+        outfile.write(Gene+file_content[2][1:]+file_content[3])
+        saved=True
+    
+elif L1Gaps<L2Gaps:
+#    print 'b'
+    if Cblock1<=2 or (fullresult[0][0]==0 and Cblock1<=4):
+        outfile.write(Gene+file_content[0][1:]+file_content[1])
+        saved=True
+# if the length of gaps is equal, choose SWA2 (H. non-scripta)
+elif file_content[0][4]=='2':
+#    print 'c'
+    if Cblock1<=2 or (fullresult[0][0]==0 and Cblock1<=4):
+        outfile.write(Gene+file_content[0][1:]+file_content[1])
+        saved=True
+    elif Cblock2<=2 or (fullresult[1][0]==0 and Cblock2<=4):
+        outfile.write(Gene+file_content[2][1:]+file_content[3])
+        saved=True
+        
+else:
+#    print 'd'
+    if Cblock2<=2 or (fullresult[1][0]==0 and Cblock2<=4):
+        outfile.write(Gene+file_content[2][1:]+file_content[3])
+        saved=True
+    elif Cblock1<=2 or (fullresult[0][0]==0 and Cblock1<=4):
+        outfile.write(Gene+file_content[0][1:]+file_content[1])
+        saved=True
+        
+if not saved:
+    print sys.argv[1]
+```
+
+* renameappend\_ref\_files.py
+
+```{r, engine='python', eval=FALSE}
+#! /usr/bin/env python
+#Usage path/to/script/script.py inputseq.fas outall.fas
+# v 08/08/2014
+# This script renames the sequences including the filename|seqname and appends them to a single output file if used in combination with bash for loop.
+
+import sys as sys
+
+
+FasFile = open(sys.argv[1],'r')
+FasOut = open(sys.argv[2],'a')
+
+#file_content=FasFile.readlines()
+#Bangene=sys.argv[1].rsplit('/')[-1].rsplit('_')[:2]
+Bangene=sys.argv[1].rsplit('/')[-1].rsplit('_')
+
+for line in FasFile:
+    if line[0]=='>':
+        if len(Bangene)<=7:
+            FasOut.write('>'+Bangene[0]+'_'+Bangene[1]+"|"+line[1:])
+        else:
+            FasOut.write('>'+Bangene[0]+'_'+Bangene[1]+'_'+Bangene[2]+"|"+line[1:])
+    else:
+        FasOut.write(line)
+```
+
+* parseanno.py
+
+```{r, engine='python', eval=FALSE}
+#! /usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+# USAGE sript genelist.txt annotab.csv
+# v 05/08/2014
+# This script pulls out the entries from the banana gene annotation table based on a list of according banana gene names. 
+
+import os as os
+import sys
+
+#genelist = open('02_get_common_gene_seq/sorted_genelist.txt','r')
+#MACUanno = open('00D_DB/banana_genefunct_biomart.txt','r')
+
+genelist = open(sys.argv[1],'r')
+MACUanno = open(sys.argv[2],'r')
+geneanno = open("parsedanno.csv",'a')
+
+#element=MACUanno.readlines().rsplit()
+#gene=genelist.readline().rstrip("\n")
+#element=element.split(',')
+
+rows=[]
+list_name=[]
+
+for line in MACUanno:
+    rows.append(line)
+    list_name.append(line.rsplit(',')[0])
+
+for i in genelist:
+    j=i.rstrip('\n')
+    marker=0
+    while (list_name[marker:].count(j)>0): 
+        index_g=list_name[marker:].index(j)
+        geneanno.write(rows[marker+index_g])
+        marker+=index_g+1
+
+```
+
+* pullseqs.py (didn't use it though?!)
+
+```{r, engine='python', eval=FALSE}
+#! /usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+# USAGE python sriptname.py allfasta.fas sublistgeneID.txt subfile.fas
+# v 12/08/2014
+# This script pulls out sequences from a fasta file based on a text file list of gene IDs. fasta: >geneID|other... 
+
+import os as os
+import sys
+
+#genefas = open("/Users/Jeannine/Documents/NGS_transcriptomeSWA/05_cov_musagenes/refseqs_1046_manedt.fas",'r')
+#sublist = open("/Users/Jeannine/Documents/NGS_transcriptomeSWA/05_cov_musagenes/569_regions_geneID_only.txt", 'r')
+
+genefas = open(sys.argv[1],'r')
+sublist = open(sys.argv[2],'r')
+outfas = open(sys.argv[3],'a')
+
+list_content = sublist.readlines()
+
+for i in range(len(list_content)):
+    list_content[i] = list_content[i][:-1]
+
+tracer=False
+#check=[]
+for line in genefas:
+    if line[0]=='>':
+        ID=line.rsplit('|')[0][1:]
+        if ID in list_content:
+            tracer=True
+            outfas.write(line)
+            #check.append(ID)
+        else: 
+            tracer=False
+    else: 
+        if tracer:
+            outfas.write(line)
+            
+outfas.close()    
+```
+
+* synNonSyn_JM2.py # annotate coding potential of variants 
+
+```{r, engine='python', eval=FALSE}
+#!/usr/local/python2.6
+# -*- coding: utf-8 -*-
+# this script annotates SNPs from a vcf file as synonymous or non-synonymous
+#USAGE ./synNonSyn.py fasta.cds codon-table_noh.txt input.vcf output.vcf
+
+# input1 ~/Documents/NGS_transcriptomeSWA/06_SNPcalling/refseq84cp40mtPhoDcds_sl_b.cds # = longest coding sequence for each reference gene extracted from trinity transdecoder
+# input2 codon table (taken from VCFtools, or so ...?)
+# input3 input.synNonsyn.vcf
+# input4 output file name
+
+import os as os
+import sys
+
+file_cds=open(sys.argv[1],'r')
+
+list_gene=[]
+list_gene_orf=[]
+list_gene_seq=[]
+
+current_seq=''
+
+for line in file_cds:
+  if line[0]=='>':
+    
+    if current_seq !='':
+      list_gene_seq.append(current_seq)
+      current_seq=''
+      
+    info=line.rsplit(' ')[-1]
+    info=info.rsplit(':')
+    list_gene.append(info[0])
+    info=info[1].rsplit('-')
+    list_gene_orf.append(info[0])
+    
+  else:
+    info=line.rstrip('\n')
+    current_seq=current_seq+info
+    
+list_gene_seq.append(current_seq)
+    
+file_cds.close()
+
+# file_code=open('codon-table_noh.txt','r')
+file_code=open(sys.argv[2],'r')
+
+list_aa=[]
+list_cod=[]
+
+for line in file_code:
+  info=line.rstrip('\n').rsplit(': ')
+  list_aa.append(info[1])
+  list_cod.append(info[0])
+
+file_code.close()
+
+file_SNP=open(sys.argv[3],'r')
+file_output=open(sys.argv[4],'w')
+
+for line in file_SNP:
+  info=line.rsplit('\t')
+  pos=list_gene.index(info[0])
+  orf=list_gene_orf[pos]
+  snp_pos=int(info[1])-int(orf)
+  list_alt_snp=info[4].rsplit(',')
+  result=';COD='
+  if int(info[1])>len(list_gene_seq[pos])/3*3 or snp_pos<0:
+    result=result+'NA,'
+  else:
+    for i in range(len(list_alt_snp)):
+      if snp_pos%3==0:
+	codon=list_gene_seq[pos][snp_pos:snp_pos+3]
+	alt_codon=list_alt_snp[i]+codon[1:]
+	
+      elif snp_pos%3==1:
+	codon=list_gene_seq[pos][snp_pos-1:snp_pos+2]
+	alt_codon=codon[0]+list_alt_snp[i]+codon[2]
+      else:
+	codon=list_gene_seq[pos][snp_pos-2:snp_pos+1]
+	alt_codon=codon[0:2]+list_alt_snp[i]
+      
+      if list_aa[list_cod.index(codon)]==list_aa[list_cod.index(alt_codon)]:
+	result=result+list_alt_snp[i]+':syn,'
+      else:
+	result=result+list_alt_snp[i]+':nonsyn,'
+    
+  info[7]=info[7]+result[:-1]
+  
+  # need to deal with the case more than one alt
+  for i in range(len(info)-1):
+    info[i]=info[i]+'\t'
+    
+  file_output.writelines(info)
+
+file_SNP.close()
+file_output.close()
+```
+
+* exon_script04.py
+
+```{r, engine='python', eval=FALSE}
+# exon_script04.py
+# select variants that match within locally aligned exon boundaries of banana
+# flanking region 80 bp
+
+#! /usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+# USAGE ./sript.py 
+# v 27/01/2015
+# authors JM and AB
+# This script extracts SNPs which fulfill certain criteria within certain boundaries given a sequence
+
+# Input 
+# blastresult exons vs ref outfmt 6 + manedt strandedness
+# vcf.file containing all SNPs within loci
+# vcf.file containing targetd SNPs for resequencing
+
+###### input ######
+
+# 1 blast MUSAexons vs BB_refseq1042
+file_blast2=open('MAevsrefseq1046.rmErr.sel1042.oft6.tblx.w_pct_hit_length','r')
+
+# 2 vcf file containing targeted SNPs 
+file_tarvcf=open('BBSWA12vs1046MusA.finalSnps_ef_AF.codanno_fixedSNPs_sub730loci.wh.vcf','r')
+
+# 4 vcf file containing all SNPs within targeted loci
+file_allvcf=open('BBSWA12vs1046MusA.finalSnps_ef_AF.codanno_sub730loci.wh.vcf','r')
+
+marker_neutral=open('neutralmarker139.greplist','r')
+marker_GO=open('fix.GO.allNS153.greplist','r')
+
+###### output ######
+
+# output table
+out_tab=open('targetedSNPs_730loci_80flank_09-02.list','w') 
+out_tab.write('# LOCUS NAME \t SEQUENCE_ID \t SEQUENCE_INCLUDED_REGION \t SEQUENCE_EXCLUDED_REGION \t SEQUENCE_TARGET \t STRAND \t BORDER \t COD \n')
+out_acc_snps=open('acceptedSNPs_730loci_80flank_09-02.vcf','w')
+
+###### script ######
+
+#data_file=file_blast2.readlines()
+#data_file=data_file[0].rsplit('\r')
+
+## length of the flanking region around the targeted SNP
+
+flank=80
+
+## reading the file_blast2 and store in memory
+
+dict_max_exon={}
+data_exon=file_blast2.readlines()
+for i in range(1,len(data_exon)):
+  data_exon[i]=data_exon[i].rsplit('\t')
+  if data_exon[i][1] not in dict_max_exon.keys():
+    dict_max_exon[data_exon[i][1]]=1
+#  exon_end
+  dict_max_exon[data_exon[i][1]]=max(dict_max_exon[data_exon[i][1]],int(data_exon[i][9]))
+
+dict_snp={}
+for line in file_allvcf:
+  if line[0]!='#':
+    info=line.rsplit('\t')
+    SNPpos=int(info[1])
+    name_gene=info[0].rsplit('|')[0]
+    if name_gene not in dict_snp.keys():
+      dict_snp[name_gene]=[]
+    dict_snp[name_gene].append(SNPpos)   
+
+#dict_N={}
+#for line in marker_neutral:
+#  marker_name=line.rsplit('\n')[0]
+#  char1='neutral'
+#  if marker_name not in dict_N.keys():
+#    dict_N[marker_name]=[]
+#  dict_N[marker_name].append(char1)
+
+#dict_GO={}
+#for line in marker_GO:
+#  marker_name=line.rsplit('\n')[0]
+#  char2='flower'
+#  if marker_name not in dict_GO.keys():
+#   dict_GO[marker_name]=[]
+#  dict_GO[marker_name].append(char2)
+
+for line in file_tarvcf:
+  if line[0]!='#':
+    info=line.rsplit('\t')
+    vcfline=line.split('\t')
+    SNPpos=int(info[1])
+    COD=info[7].rsplit(';')[-1].rsplit('=')[1]    
+    name_gene=info[0].rsplit('|')[0]
+    bool_t=0
+    #vwk=input()
+    for j in range(1,len(data_exon)):
+      if data_exon[j][1].count(name_gene):
+# check strand positive
+	if data_exon[j][10]=='+': 
+	  #check SNPs have X bp flanking region
+	  if SNPpos<int(data_exon[j][9])-flank and SNPpos>int(data_exon[j][8])+flank:
+	    #check if SNP in first or last exon and if true add 10bp to flanking region
+	    if ((int(data_exon[j][8])==1 and SNPpos<int(data_exon[j][8])+flank+10)) or ((int(data_exon[j][9])==dict_max_exon[data_exon[j][1]] and SNPpos>int(data_exon[j][9])-10-flank)):
+	      if name_gene in dict_snp.keys():
+		list_excluded=''
+		for i in dict_snp[name_gene]:
+		  if i!= SNPpos and i <int(data_exon[j][9]) and i > int(data_exon[j][8]):
+		    list_excluded=list_excluded+str(i)+', 1; '
+		out_tab.write(info[0]+'\t'+info[0]+'|exon.'+data_exon[j][0].rsplit('.')[1].rsplit('|')[0]+'\t'+str(int(data_exon[j][8]))+', '+str(int(data_exon[j][13])-1)+'\t'+list_excluded+'\t'+str(SNPpos)+',1'+'\t'+data_exon[j][10]+'\t'+'border\t'+COD+'\n')
+		#
+		out_acc_snps.write(str(vcfline[0])+'\t'+str(vcfline[1])+'\t'+str(vcfline[2])+'\t'+str(vcfline[3])+'\t'+str(vcfline[4])+'\t'+str(vcfline[5])+'\t'+str(vcfline[6])+'\t'+str(vcfline[7])+'\t'+str(vcfline[8])+'\t'+str(vcfline[9])+'\t'+str(vcfline[10]))
+	      else:
+		out_tab.write(info[0]+'\t'+info[0]+'|exon.'+data_exon[j][0].rsplit('.')[1].rsplit('|')[0]+'\t'+str(int(data_exon[j][8]))+', '+str(int(data_exon[j][13])-1)+'\t'+'\t'+str(SNPpos)+',1'+'\t'+data_exon[j][10]+'\t'+'border\t'+COD+'\n')
+		#
+		out_acc_snps.write(str(vcfline[0])+'\t'+str(vcfline[1])+'\t'+str(vcfline[2])+'\t'+str(vcfline[3])+'\t'+str(vcfline[4])+'\t'+str(vcfline[5])+'\t'+str(vcfline[6])+'\t'+str(vcfline[7])+'\t'+str(vcfline[8])+'\t'+str(vcfline[9])+'\t'+str(vcfline[10]))
+	    else:
+	      if name_gene in dict_snp.keys():
+		list_excluded=''
+		for i in dict_snp[name_gene]:
+		  if i!= SNPpos and i <int(data_exon[j][9]) and i > int(data_exon[j][8]):
+		    list_excluded=list_excluded+str(i)+', 1; '
+		out_tab.write(info[0]+'\t'+info[0]+'|exon.'+data_exon[j][0].rsplit('.')[1].rsplit('|')[0]+'\t'+str(int(data_exon[j][8]))+', '+str(int(data_exon[j][13])-1)+'\t'+list_excluded+'\t'+str(SNPpos)+',1\t'+data_exon[j][10]+'\t\t'+COD+'\n')
+		#
+		out_acc_snps.write(str(vcfline[0])+'\t'+str(vcfline[1])+'\t'+str(vcfline[2])+'\t'+str(vcfline[3])+'\t'+str(vcfline[4])+'\t'+str(vcfline[5])+'\t'+str(vcfline[6])+'\t'+str(vcfline[7])+'\t'+str(vcfline[8])+'\t'+str(vcfline[9])+'\t'+str(vcfline[10]))
+	      else:
+		out_tab.write(info[0]+'\t'+info[0]+'|exon.'+data_exon[j][0].rsplit('.')[1].rsplit('|')[0]+'\t'+str(int(data_exon[j][8]))+', '+str(int(data_exon[j][13])-1)+'\t'+'\t'+str(SNPpos)+',1\t'+data_exon[j][10]+'\t\t'+COD+'\n')
+		#
+		out_acc_snps.write(str(vcfline[0])+'\t'+str(vcfline[1])+'\t'+str(vcfline[2])+'\t'+str(vcfline[3])+'\t'+str(vcfline[4])+'\t'+str(vcfline[5])+'\t'+str(vcfline[6])+'\t'+str(vcfline[7])+'\t'+str(vcfline[8])+'\t'+str(vcfline[9])+'\t'+str(vcfline[10]))
+# negative stranded		
+	else: 
+	  if SNPpos<int(data_exon[j][8])-flank and SNPpos>int(data_exon[j][9])+flank:	    
+	    if ((int(data_exon[j][9])==1 and SNPpos<int(data_exon[j][9])+flank+10)) or ((int(data_exon[j][8])==dict_max_exon[data_exon[j][1]] and SNPpos>int(data_exon[j][8])-flank-10)):
+	      if name_gene in dict_snp.keys():
+		list_excluded=''
+		for i in dict_snp[name_gene]:
+		  if i!= SNPpos and i <int(data_exon[j][8]) and i > int(data_exon[j][9]):
+		    list_excluded=list_excluded+str(i)+', 1; '
+		out_tab.write(info[0]+'\t'+info[0]+'|exon.'+data_exon[j][0].rsplit('.')[1].rsplit('|')[0]+'\t'+str(int(data_exon[j][9]))+', '+str(int(data_exon[j][13])-1)+'\t'+list_excluded+'\t'+str(SNPpos)+',1'+'\t'+data_exon[j][10]+'\t'+'border\t'+COD+'\n')
+		#
+		out_acc_snps.write(str(vcfline[0])+'\t'+str(vcfline[1])+'\t'+str(vcfline[2])+'\t'+str(vcfline[3])+'\t'+str(vcfline[4])+'\t'+str(vcfline[5])+'\t'+str(vcfline[6])+'\t'+str(vcfline[7])+'\t'+str(vcfline[8])+'\t'+str(vcfline[9])+'\t'+str(vcfline[10]))		  
+	      else:
+		out_tab.write(info[0]+'\t'+info[0]+'|exon.'+data_exon[j][0].rsplit('.')[1].rsplit('|')[0]+'\t'+str(int(data_exon[j][9]))+', '+str(int(data_exon[j][13])-1)+'\t'+'\t'+str(SNPpos)+',1'+'\t'+data_exon[j][10]+'\t'+'border\t'+COD+'\n')
+		#
+		out_acc_snps.write(str(vcfline[0])+'\t'+str(vcfline[1])+'\t'+str(vcfline[2])+'\t'+str(vcfline[3])+'\t'+str(vcfline[4])+'\t'+str(vcfline[5])+'\t'+str(vcfline[6])+'\t'+str(vcfline[7])+'\t'+str(vcfline[8])+'\t'+str(vcfline[9])+'\t'+str(vcfline[10]))		  
+	    else:
+	      if name_gene in dict_snp.keys():
+		list_excluded=''
+		for i in dict_snp[name_gene]:
+		  if i!= SNPpos and i <int(data_exon[j][8]) and i > int(data_exon[j][9]):
+		    list_excluded=list_excluded+str(i)+', 1; '
+		out_tab.write(info[0]+'\t'+info[0]+'|exon.'+data_exon[j][0].rsplit('.')[1].rsplit('|')[0]+'\t'+str(int(data_exon[j][9]))+', '+str(int(data_exon[j][13])-1)+'\t'+list_excluded+'\t'+str(SNPpos)+',1\t'+data_exon[j][10]+'\t\t'+COD+'\n')
+		#
+		out_acc_snps.write(str(vcfline[0])+'\t'+str(vcfline[1])+'\t'+str(vcfline[2])+'\t'+str(vcfline[3])+'\t'+str(vcfline[4])+'\t'+str(vcfline[5])+'\t'+str(vcfline[6])+'\t'+str(vcfline[7])+'\t'+str(vcfline[8])+'\t'+str(vcfline[9])+'\t'+str(vcfline[10]))		  
+	      else:
+		out_tab.write(info[0]+'\t'+info[0]+'|exon.'+data_exon[j][0].rsplit('.')[1].rsplit('|')[0]+'\t'+str(int(data_exon[j][9]))+', '+str(int(data_exon[j][13])-1)+'\t'+'\t'+str(SNPpos)+',1\t'+data_exon[j][10]+'\t\t'+COD+'\n')
+		#
+		out_acc_snps.write(str(vcfline[0])+'\t'+str(vcfline[1])+'\t'+str(vcfline[2])+'\t'+str(vcfline[3])+'\t'+str(vcfline[4])+'\t'+str(vcfline[5])+'\t'+str(vcfline[6])+'\t'+str(vcfline[7])+'\t'+str(vcfline[8])+'\t'+str(vcfline[9])+'\t'+str(vcfline[10]))		  
+	    
+out_tab.close()
+out_acc_snps.close()
+``` 
+
+* coverage.R 
+
+```{r, eval=FALSE}
+#!/usr/bin/env Rscript
+#USAGE Rscript scriptname depthtable outtable
+
+args<-commandArgs(TRUE)
+print(args)
+#a=read.table('SWA2realign_vsens.coordSorted_samdepth.txt')
+a=read.table(args[1])
+
+
+#output=file('list_coverage_per_gene_per_quantile.txt',open='w')
+output=file(args[2],open='w')
+
+list_to_save=c('Gene name','Mean All','Mean Q1','Mean Q2','Mean Q3','Mean Q4','Min All','Min Q1','Min Q2','Min Q3','Min Q4','Max All','Max Q1','Max Q2','Max Q3','Max Q4','\n')
+writeLines(list_to_save,con=output,sep='\t')
+list_name=levels(a$V1)
+# for (i in seq(length(list_name)))
+
+for (i in seq(length(list_name)))
+{
+b=a[a$V1==list_name[i],]
+c=floor(length(b$V1)/4)
+d=length(b$V1)%%4
+
+if (d==0) 
+{b1=b$V3[(1):(c)];b2=b$V3[(c+1):(2*c)];b3=b$V3[(2*c+1):(3*c)];b4=b$V3[(3*c+1):(4*c)]} 
+if (d==1) 
+{b1=b$V3[(1):(c)];b2=b$V3[(c+1):(2*c)];b3=b$V3[(2*c+1):(3*c)];b4=b$V3[(3*c+1):(4*c+1)]} 
+if (d==2) 
+{b1=b$V3[(1):(c)];b2=b$V3[(c+1):(2*c)];b3=b$V3[(2*c+1):(3*c+1)];b4=b$V3[(3*c+2):(4*c+2)]} 
+if (d==3) 
+{b1=b$V3[(1):(c)];b2=b$V3[(c+1):(2*c+1)];b3=b$V3[(2*c+2):(3*c+2)];b4=b$V3[(3*c+3):(4*c+3)]} 
+
+list_to_save=c(list_name[i],round(mean(b$V3),2),round(mean(b1),2),round(mean(b2),2),round(mean(b3),2),round(mean(b4),2),min(b$V3),min(b1),min(b2),min(b3),min(b4),max(b$V3),max(b1),max(b2),max(b3),max(b4),'\n')
+
+writeLines(list_to_save,con=output,sep="\t")
+
+if(i%%50==0) print(i)
+
+}
+
+close(output)
+```
+
